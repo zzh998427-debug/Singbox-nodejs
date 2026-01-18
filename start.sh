@@ -1,10 +1,10 @@
-##!/bin/bash
+#!/bin/bash
 set -e
 
-# ================== 端口设置 ==================
-export TUIC_PORT=${TUIC_PORT:-""}
-export HY2_PORT=${HY2_PORT:-""}
-export REALITY_PORT=${REALITY_PORT:-""}
+# ================== 端口设置（修改：固定端口 20127，默认启用 Hy2 + Reality，禁用 TUIC 以避免 UDP 冲突）==================
+export TUIC_PORT=${TUIC_PORT:-0}          # 默认禁用 TUIC（避免 UDP 冲突）
+export HY2_PORT=${HY2_PORT:-20127}        # 默认 Hysteria2 用 20127 (UDP)
+export REALITY_PORT=${REALITY_PORT:-20127} # 默认 Reality 用 20127 (TCP)
 
 # ================== 强制切换到脚本所在目录 ==================
 cd "$(dirname "$0")"
@@ -29,23 +29,26 @@ fi
 # ================== 创建目录 ==================
 [ ! -d "${FILE_PATH}" ] && mkdir -p "${FILE_PATH}"
 
-# ================== 架构检测 & 下载 sing-box ==================
+# ================== 架构检测 & 下载 sing-box（修改：使用官方 GitHub 下载，避免潜在后门风险）==================
 ARCH=$(uname -m)
-BASE_URL=""
+SB_ARCH=""
 if [[ "$ARCH" == "arm"* ]] || [[ "$ARCH" == "aarch64" ]]; then
-  BASE_URL="https://arm64.ssss.nyc.mn"
+  SB_ARCH="arm64"
 elif [[ "$ARCH" == "amd64"* ]] || [[ "$ARCH" == "x86_64" ]]; then
-  BASE_URL="https://amd64.ssss.nyc.mn"
+  SB_ARCH="amd64"
 elif [[ "$ARCH" == "s390x" ]]; then
-  BASE_URL="https://s390x.ssss.nyc.mn"
+  SB_ARCH="s390x"
 else
   echo "不支持的架构: $ARCH"
   exit 1
 fi
 
-FILE_INFOS=("sb sing-box")
-declare -A FILE_MAP
+# 获取最新 sing-box 版本 tag
+LATEST_TAG=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 
+# 下载官方 sing-box
+BASE_URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}"
+FILE_NAME="sing-box-${LATEST_TAG#v}-linux-${SB_ARCH}.tar.gz"
 download_file() {
   local URL=$1
   local FILENAME=$2
@@ -59,14 +62,14 @@ download_file() {
   fi
 }
 
-for entry in "${FILE_INFOS[@]}"; do
-  URL=$(echo "$entry" | cut -d ' ' -f1)
-  NAME=$(echo "$entry" | cut -d ' ' -f2)
-  NEW_NAME="${FILE_PATH}/$(head /dev/urandom | tr -dc a-z0-9 | head -c6)"
-  download_file "${BASE_URL}/${URL}" "$NEW_NAME"
-  chmod +x "$NEW_NAME"
-  FILE_MAP[$NAME]="$NEW_NAME"
-done
+# 下载并解压
+TMP_TAR="${FILE_PATH}/${FILE_NAME}"
+download_file "${BASE_URL}/${FILE_NAME}" "$TMP_TAR"
+tar -xzf "$TMP_TAR" -C "${FILE_PATH}"
+SING_BOX_PATH="${FILE_PATH}/sing-box-${LATEST_TAG#v}-linux-${SB_ARCH}/sing-box"
+mv "$SING_BOX_PATH" "${FILE_PATH}/sing-box"
+chmod +x "${FILE_PATH}/sing-box"
+rm -rf "$TMP_TAR" "${FILE_PATH}/sing-box-${LATEST_TAG#v}-linux-${SB_ARCH}"
 
 # ================== 固定 Reality 密钥 ==================
 KEY_FILE="${FILE_PATH}/key.txt"
@@ -76,7 +79,7 @@ if [ -f "$KEY_FILE" ]; then
   public_key=$(grep "PublicKey:" "$KEY_FILE" | awk '{print $2}')
 else
   echo -e "\e[1;33m[密钥] 首次生成 Reality 密钥对...\e[0m"
-  output=$("${FILE_MAP[sing-box]}" generate reality-keypair)
+  output=$("${FILE_PATH}/sing-box" generate reality-keypair)
   echo "$output" > "$KEY_FILE"
   private_key=$(echo "$output" | awk '/PrivateKey:/ {print $2}')
   public_key=$(echo "$output" | awk '/PublicKey:/ {print $2}')
@@ -157,7 +160,7 @@ cat > "${FILE_PATH}/config.json" <<EOF
 EOF
 
 # ================== 启动 sing-box ==================
-"${FILE_MAP[sing-box]}" run -c "${FILE_PATH}/config.json" &
+"${FILE_PATH}/sing-box" run -c "${FILE_PATH}/config.json" &
 SINGBOX_PID=$!
 echo "[SING-BOX] 启动完成 PID=$SINGBOX_PID"
 
@@ -195,7 +198,7 @@ schedule_restart() {
       kill "$SINGBOX_PID" 2>/dev/null || true
       sleep 3
 
-      "${FILE_MAP[sing-box]}" run -c "${FILE_PATH}/config.json" &
+      "${FILE_PATH}/sing-box" run -c "${FILE_PATH}/config.json" &
       SINGBOX_PID=$!
 
       echo "[Sing-box重启完成] 新 PID: $SINGBOX_PID"
